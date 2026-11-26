@@ -1,0 +1,10 @@
+# 빌드 결과 · 캐시
+build/
+dist/
+__pycache__/
+*.spec
+# 받은 지도 자료 · 개인 설정
+maps/
+promilia-tracker2.json
+promilia-tracker2-gacha*.json
+ocr-debug/
