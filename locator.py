@@ -15,8 +15,11 @@ SITE = 'https://azur-promilia.pages.dev'
 BASE = SITE + '/img/g/map/'
 # 미니맵 자리 · 크기 (세로 2160 화면 기준 px — 화면 세로에 비례): 가운데 (285, 245) · 비교에 쓰는 반지름 150
 MM_CX, MM_CY, MM_R = 285, 245, 150
-# 미니맵 축척: 세로 2160 화면에서 1m 가 몇 px 인지 (새싹 골짜기에서 잰 값 · calibrate 로 다시 잴 수 있음)
-MM_PX_PER_M = 3.45
+# 미니맵 축척: 게임 미니맵은 지도 그림(world_area.mapSize · data.json maps[].tex)의 화소 기준으로 확대됨 → 지도마다 1m 당 화면 px 가 다름
+#   세로 2160 화면에서 1m = MM_TEX_K × tex(그림 가로 화소) / 지도 가로(m)
+#   MM_TEX_K = 새싹 골짜기에서 잰 3.45px/m × 2100m / 8192px (11-26 샤루루 마을에서 확인: 2048px · 350m → 5.18px/m)
+MM_PX_PER_M = 3.45                       # 예전 값(tex 가 없는 지도 자료일 때만 씀)
+MM_TEX_K = 3.45 * 2100 / 8192
 COARSE, FINE = 1024, 2048
 
 
@@ -65,6 +68,7 @@ class MapData:
     def __init__(self, m, cache):
         self.id, self.name = str(m['id']), m['name']
         self.size, self.xf, self.h = m['size'], m.get('xf') or [0, 0, m['size'][0], m['size'][1], 0], m.get('h')
+        self.tex = m.get('tex')            # 게임 지도 그림 가로 화소 (미니맵 축척 계산)
         d = os.path.join(cache, self.id)
         base = Image.open(os.path.join(d, 'base.webp')).convert('RGB')
         self.fc = feat(base.resize((COARSE, COARSE), Image.BILINEAR))
@@ -118,9 +122,13 @@ class Locator:
         k = h / 2160
         return int((MM_CX - MM_R) * k), int((MM_CY - MM_R) * k), int((MM_CX + MM_R) * k), int((MM_CY + MM_R) * k)
 
+    def ppm(self, mp):
+        """이 지도의 미니맵 축척 (세로 2160 화면에서 1m 당 px) — 지도 그림 화소 밀도에 비례 · 설정 px_per_m 은 새싹 골짜기 기준값으로 보고 같은 비율로 맞춤"""
+        return self.px_per_m / MM_PX_PER_M * MM_TEX_K * mp.tex / mp.size[0] if mp.tex else self.px_per_m
+
     def tsize(self, mp, res, scale=1.0):
         """미니맵 조각(지름 2·MM_R)이 지도 그림(res px)에서 차지하는 크기"""
-        return 2 * MM_R / (self.px_per_m * scale) / mp.size[0] * res
+        return 2 * MM_R / (self.ppm(mp) * scale) / mp.size[0] * res
 
     def coarse(self, patch, maps=None):
         best = None

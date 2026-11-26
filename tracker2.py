@@ -13,7 +13,7 @@ import asyncio, base64, hashlib, json, os, struct, sys, time, threading
 import ctypes, ctypes.wintypes as W
 
 APP = '프로밀리아 가이드 트래커'
-VER = '2.0.0'
+VER = '2.0.1'
 PORT = 46822
 MAP_URL = 'https://azur-promilia.pages.dev/map'
 ORIGINS = ('https://azur-promilia.pages.dev', 'http://localhost:8791', 'http://127.0.0.1:8791')   # 이 사이트에서만 연결 허용
