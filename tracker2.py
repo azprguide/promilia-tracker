@@ -13,7 +13,7 @@ import asyncio, base64, hashlib, json, os, struct, sys, time, threading
 import ctypes, ctypes.wintypes as W
 
 APP = '프로밀리아 가이드 트래커'
-VER = '2.0.1'
+VER = '2.0.2'
 PORT = 46822
 MAP_URL = 'https://azur-promilia.pages.dev/map'
 ORIGINS = ('https://azur-promilia.pages.dev', 'http://localhost:8791', 'http://127.0.0.1:8791')   # 이 사이트에서만 연결 허용
@@ -82,7 +82,7 @@ def worker():
         St.error = f'지도 자료를 받지 못했어요 (인터넷 연결 확인): {type(e).__name__}'; setstate('idle', '지도 자료 없음'); return
     names = {m.id: m.name for m in loc.maps}
     St.scenes = names
-    miss = 0; t_lock = 0.0
+    miss = 0; t_lock = 0.0; wsize = None
     while not St.quit:
         t0 = time.time()
         if St.reacquire.is_set() or St.reconnect.is_set():
@@ -91,6 +91,13 @@ def worker():
         if not r:
             St.game = 'off'; St.pos = None; loc.cur = None; setstate('nogame', '게임 창을 찾는 중…'); time.sleep(1); continue
         St.game = 'on'; x, y, w, h = r
+        if (w, h) != wsize or miss % 40 == 12:                         # 창 크기가 바뀌었거나 오래 못 찾으면 미니맵 테두리를 다시 찾음 (21:9 등)
+            wsize = (w, h)
+            try:
+                g, sc = loc.detect(lambda b: capture.grab((x + b[0], y + b[1], x + b[2], y + b[3])), w, h)
+                St.debug = f'미니맵 자리 {g} (테두리 {sc:.2f})' if g else f'미니맵 테두리를 못 찾아 기본 자리를 씀 ({sc:.2f})'
+            except Exception as e:
+                loc.geom = None; St.debug = f'미니맵 자리 찾기 실패: {type(e).__name__}'
         try:
             bx = loc.crop_box(w, h); img = capture.grab((x + bx[0], y + bx[1], x + bx[2], y + bx[3]))
             res = loc.locate(img)

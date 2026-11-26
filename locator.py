@@ -9,7 +9,7 @@
 """
 import io, json, math, os, urllib.request
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 
 SITE = 'https://azur-promilia.pages.dev'
 BASE = SITE + '/img/g/map/'
@@ -21,6 +21,57 @@ MM_CX, MM_CY, MM_R = 285, 245, 150
 MM_PX_PER_M = 3.45                       # 예전 값(tex 가 없는 지도 자료일 때만 씀)
 MM_TEX_K = 3.45 * 2100 / 8192
 COARSE, FINE = 1024, 2048
+# 미니맵 둥근 테두리 (세로 2160 · 16:9 화면에서 잰 값): 가운데 (290, 246) · 반지름 184 — 화면 비율(21:9 · 32:9 · 16:10)이나 UI 배치가 달라도
+# 이 테두리를 화면에서 직접 찾아 미니맵 자리를 잡음(find_ring). 못 찾으면 예전처럼 '세로 비례 + 왼쪽 위' 자리
+RING_CX, RING_CY, RING_R = 290, 246, 184
+
+
+def ring_score(a, R, angles=72):
+    """회색조 그림 a 의 모든 화소를 가운데로 봤을 때, 반지름 R 원 위 밝기 − 안팎(±5px) 밝기 (밝은 얇은 테두리일수록 큼)"""
+    H, W = a.shape; P = R + 8; A = np.pad(a, P, mode='edge'); on = np.zeros((H, W), np.float32); off = np.zeros((H, W), np.float32)
+    for t in np.linspace(0, 2 * np.pi, angles, endpoint=False):
+        c, s = math.cos(t), math.sin(t)
+        for rr, acc, wgt in ((R, on, 1.0), (R - 5, off, 0.5), (R + 5, off, 0.5)):
+            dx, dy = int(round(rr * c)), int(round(rr * s))
+            acc += wgt * A[P + dy:P + dy + H, P + dx:P + dx + W]
+    return (on - off) / angles
+
+
+def find_ring(img, k_lo, k_hi):
+    """화면 왼쪽 위 조각(img · PIL)에서 미니맵 테두리 찾기 → (가운데 x, 가운데 y, 반지름, 점수) · 반지름은 184·k_lo ~ 184·k_hi 사이"""
+    f = max(1, int(RING_R * k_lo / 40))                     # 반지름이 약 40px 이 되게 줄여서 먼저 넓게
+    g = img.convert('L'); full = np.asarray(g, np.float32) / 255
+    # 얇은 테두리가 줄일 때 흐려지지 않게: 주변 평균을 뺀 '밝은 선'만 남기고(고주파) f×f 칸의 최댓값으로 줄임
+    hp = full - np.asarray(g.filter(ImageFilter.BoxBlur(4)), np.float32) / 255
+    H2, W2 = hp.shape[0] // f, hp.shape[1] // f
+    a = hp[:H2 * f, :W2 * f].reshape(H2, f, W2, f).max(axis=(1, 3)) if f > 1 else hp
+    best = (-1, 0, 0, 0)
+    for R in range(max(6, int(RING_R * k_lo / f * 0.92)), int(RING_R * k_hi / f * 1.08) + 1):
+        s = ring_score(a, R); iy, ix = np.unravel_index(int(np.argmax(s)), s.shape)
+        if s[iy, ix] > best[0]:
+            best = (float(s[iy, ix]), ix * f, iy * f, R * f)
+    sc, cx, cy, R = best
+    if f > 1:                                               # 원래 크기에서 둘레만 다시
+        x0, y0 = max(0, cx - R - 3 * f), max(0, cy - R - 3 * f)
+        a = np.asarray(g.crop((x0, y0, min(g.width, cx + R + 3 * f), min(g.height, cy + R + 3 * f))), np.float32) / 255
+        best = (-1, 0, 0, 0)
+        for R2 in range(R - 2 * f, R + 2 * f + 1):
+            s = ring_score(a, R2, 96); m = np.zeros_like(s, bool); m[max(0, cy - y0 - 2 * f):cy - y0 + 2 * f + 1, max(0, cx - x0 - 2 * f):cx - x0 + 2 * f + 1] = True
+            s = np.where(m, s, -1); iy, ix = np.unravel_index(int(np.argmax(s)), s.shape)
+            if s[iy, ix] > best[0]:
+                best = (float(s[iy, ix]), x0 + ix, y0 + iy, R2)
+        sc, cx, cy, R = best
+    return cx, cy, R, sc
+
+
+def icon_mask(t, m):
+    """비교 마스크 m 에서 게임 미니맵 위에 겹친 아이콘(내 위치 화살표 · NPC · 퀘스트 표시 · 빨간 경로선)을 뺌 — 지도 그림에는 없는 것
+    t = feat() 결과(밝기 · 빨강−초록 · 파랑−초록): 아주 밝은 흰 테두리 · 진한 빨강/주황 · 진한 파랑은 아이콘으로 봄 (둘레 1px 까지)"""
+    L, rg, bg = t
+    ic = (L > 0.86) | (rg > 0.30) | (bg > 0.28)
+    ic = ic | np.roll(ic, 1, 0) | np.roll(ic, -1, 0) | np.roll(ic, 1, 1) | np.roll(ic, -1, 1)
+    out = m * (~ic)
+    return out if out.sum() > m.sum() * 0.5 else m          # 아이콘이 절반 넘게 가리면(이상한 화면) 그대로
 
 
 def feat(im):
@@ -116,9 +167,23 @@ class Locator:
         self.maps = [MapData(m, cache) for m in D['maps']]
         self.px_per_m = px_per_m
         self.cur = None            # (MapData, u, v) — 붙어 있는 위치
+        self.geom = None           # 화면에서 찾은 미니맵 테두리 (가운데 x, 가운데 y, 반지름) · 게임 창 안쪽 좌표
+
+    def detect(self, grab, w, h):
+        """게임 화면에서 미니맵 테두리를 찾아 자리를 정함 (창 크기가 바뀌거나 오래 못 찾을 때) — grab(box) 는 창 안쪽 좌표로 캡처
+        21:9 등 넓은 화면: 게임이 UI 를 16:9 영역 안에 가운데로 모으든 왼쪽에 붙이든 찾음 · 16:10 등 좁은 화면: 가로 비례도 함께 봄"""
+        kh, kw = h / 2160, w / 3840; k_lo, k_hi = min(kh, kw) * 0.85, max(kh, kw) * 1.15
+        side = max(0, (w - h * 16 / 9) / 2)                  # 16:9 보다 넓으면 가운데 정렬 때 왼쪽 여백
+        rw, rh = int(min(w, side + (RING_CX + RING_R) * k_hi + 40)), int(min(h, (RING_CY + RING_R) * k_hi + 40))
+        cx, cy, R, sc = find_ring(grab((0, 0, rw, rh)), k_lo, k_hi)
+        self.geom = (cx, cy, R) if sc > 0.06 else None
+        return self.geom, sc
 
     def crop_box(self, w, h):
-        """게임 화면(클라이언트 영역 w×h)에서 미니맵을 자를 자리"""
+        """게임 화면(클라이언트 영역 w×h)에서 미니맵을 자를 자리 — 찾은 테두리가 있으면 그 기준(비교 반지름 = 테두리 × 150/184)"""
+        if self.geom:
+            cx, cy, R = self.geom; r = R * MM_R / RING_R
+            return int(round(cx - r)), int(round(cy - r)), int(round(cx + r)), int(round(cy + r))
         k = h / 2160
         return int((MM_CX - MM_R) * k), int((MM_CY - MM_R) * k), int((MM_CX + MM_R) * k), int((MM_CY + MM_R) * k)
 
@@ -136,7 +201,7 @@ class Locator:
             size = max(12, int(round(self.tsize(mp, COARSE))))
             if size > COARSE // 2:
                 continue
-            t = feat(patch.resize((size, size), Image.BILINEAR)); sc = ncc(mp.fc, t, ring(size)); v, x, y = peak(sc)
+            t = feat(patch.resize((size, size), Image.BILINEAR)); sc = ncc(mp.fc, t, icon_mask(t, ring(size))); v, x, y = peak(sc)
             # 한 곳만 뚜렷하게 맞아야 함: 가장 높은 곳을 가린 뒤의 둘째 점수와 비교 (진짜 미니맵 1.5배 이상 · 오인식 1.0~1.2배)
             ix, iy, r = int(round(x)), int(round(y)), max(4, size // 2); s2 = sc.copy(); s2[max(0, iy - r):iy + r + 1, max(0, ix - r):ix + r + 1] = -1
             uniq = v / max(float(s2.max()), 1e-6)
@@ -150,7 +215,7 @@ class Locator:
         x0, y0 = int(round(u * FINE - half - w)), int(round(v * FINE - half - w)); n = size + 2 * w
         x0, y0 = max(0, min(FINE - n, x0)), max(0, min(FINE - n, y0))
         I = mp.ff[:, y0:y0 + n, x0:x0 + n]
-        t = feat(patch.resize((size, size), Image.BILINEAR)); s, x, y = peak(ncc(I, t, ring(size)))
+        t = feat(patch.resize((size, size), Image.BILINEAR)); s, x, y = peak(ncc(I, t, icon_mask(t, ring(size))))
         return s, (x0 + x + half) / FINE, (y0 + y + half) / FINE
 
     def locate(self, patch):
