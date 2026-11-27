@@ -7,7 +7,7 @@
 - 좌표: 지도 그림 위치(u, v) → 월드 좌표 = 사이트 map.html toUV 의 역변환 (data.json maps[].xf = [ox, oz, 가로, 세로, 회전])
 - 높이(y): 3D 보기용 지형 높이 그림(h.webp · 16비트)에서 읽음 (없으면 0)
 """
-import io, json, math, os, urllib.request
+import io, json, math, os, time, urllib.request
 import numpy as np
 from PIL import Image, ImageFilter
 
@@ -255,13 +255,24 @@ class Locator:
                 self.cur = (mp, u2, v2); return s, mp, u2, v2
             self.cur = None
         c = self.coarse(patch)
-        if not c or c[0] < 0.6 or c[4] < 1.25:             # 전체에서 찾을 때는 점수가 높고(0.6↑) 한 곳만 뚜렷해야(둘째의 1.25배↑) 붙음
+        # 전체에서 찾을 때는 점수가 높고(0.6↑) 한 곳만 뚜렷해야(둘째의 1.25배↑) 바로 붙음
+        # 11-28: 덜 뚜렷한 경우(1.1 ~ 1.25배)는 정밀 점수가 0.62↑ 이고 연속 두 번 같은 자리(지도 그림 1% 안)일 때 붙음
+        #   — 3440×1440 진단: 맞는 자리(새싹 골짜기)를 찾았는데 둘째의 1.20배라 계속 버려지던 것 (사이트 지도 그림이 2048px 라 미니맵보다 흐림)
+        if not c or c[0] < 0.6 or c[4] < 1.1:
             self.info = {'why': '지도와 맞는 곳 없음', 'tex': round(tx, 3), 'best_map': c[1].name if c else None, 'score': round(c[0], 3) if c else None, 'uniq': round(c[4], 2) if c else None}
             return None
-        s0, mp, u, v, _ = c
+        s0, mp, u, v, uq = c
         s, u2, v2 = self.fine(patch, mp, u, v, win=0.02)
-        if s < 0.55:
-            self.info = {'why': '정밀 맞추기 실패', 'map': mp.name, 'coarse': round(s0, 3), 'fine': round(s, 3)}
+        if s < (0.55 if uq >= 1.25 else 0.62):
+            self.info = {'why': '정밀 맞추기 실패', 'map': mp.name, 'coarse': round(s0, 3), 'fine': round(s, 3), 'uniq': round(uq, 2)}
             return None
+        if uq < 1.25:
+            p = getattr(self, 'pend', None)
+            # 사이에 다른 자리(번갈아 시험하는 기본 자리 등)에서 실패해도 4초 안이면 이어서 봄
+            if not (p and p[0] is mp and math.hypot(p[1] - u2, p[2] - v2) < 0.01 and time.time() - p[3] < 4):
+                self.pend = (mp, u2, v2, time.time())
+                self.info = {'why': '후보 확인 중(한 번 더 같은 자리면 붙음)', 'map': mp.name, 'coarse': round(s0, 3), 'fine': round(s, 3), 'uniq': round(uq, 2)}
+                return None
+        self.pend = None
         self.cur = (mp, u2, v2); self.info = {}
         return s, mp, u2, v2
