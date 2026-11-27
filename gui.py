@@ -4,7 +4,7 @@
 글꼴: Noto Serif KR(사이트와 같은 글꼴 · Windows 11 기본 포함) → 없으면 맑은 고딕
 아이콘: 선으로 그린 벡터 아이콘(연결 · 다시 찾기 · 종료 · 지도 · 위치) — 그림 파일 없이 캔버스에 그림
 """
-import math, os, sys, time, webbrowser
+import math, os, subprocess, sys, time, webbrowser
 import tkinter as tk
 import tkinter.font as tkfont
 
@@ -76,7 +76,7 @@ class App:
         except Exception:
             pass
         self.cv = tk.Canvas(self.root, width=self.px(W), height=self.px(600), bg=C['bg'], highlightthickness=0); self.cv.pack()
-        self.hover = None; self.adv = False; self.btns = {}
+        self.hover = None; self.adv = False; self.btns = {}; self.note = ''
         self.cv.bind('<Motion>', self.on_move); self.cv.bind('<Button-1>', self.on_click); self.cv.bind('<Leave>', lambda e: self.set_hover(None))
         self.root.protocol('WM_DELETE_WINDOW', self.quit)
         self.sig = None; self.tick()
@@ -115,8 +115,57 @@ class App:
         cv.create_text(P(x + 48), P(y + 11), text=text, anchor='w', fill=C['tx'], font=self.font(13), tags=tag)
         self.btns[key] = (x, y - 2, W - 40, y + 24)
 
+    def dg(self):
+        return self.meta.get('diag')
+
+    def consent_pending(self):
+        d = self.dg(); return bool(d) and d.consent(self.St.cfg) is None
+
+    def set_consent(self, yes):
+        """로그 수집 동의 · 거부 (처음 실행 화면 · 고급 설정) — 거부하면 지금까지 모은 로그도 지움"""
+        d = self.dg(); S = self.St
+        S.cfg['diag'] = 'yes' if yes else 'no'; S.cfg['diag_ver'] = d.CONSENT_VER; self.save()
+        if not yes:
+            d.set_on(False)
+            for p in (d.S['path'], d.S['path'] + '.1'):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+        else:
+            d.set_on(True)
+
+    def draw_consent(self):
+        """처음 실행할 때 로그 수집 동의 화면 (diag.NOTICE) — 동의 · 거부 어느 쪽이든 트래커는 시작함"""
+        d = self.dg(); cv, P = self.cv, self.px; x1, x2 = 20, W - 20; y = 18; top = y
+        rid = rrect(cv, P(x1), P(y), P(x2), P(y + 10), P(R), fill=C['card'], outline=C['line'])
+        icon(cv, 'star', P(x1 + 30), P(y + 32), P(22), C['gold'], 'logo')
+        cv.create_text(P(x1 + 50), P(y + 32), text=d.NOTICE_TITLE, anchor='w', fill=C['tx'], font=self.font(18, True))
+        y += 58; wrap = P(x2 - x1 - 40)
+        for kind, text in d.NOTICE:
+            if kind == 'h':
+                y += 6; t = cv.create_text(P(x1 + 20), P(y), text=text, anchor='nw', fill=C['gold'], font=self.font(13, True), width=wrap)
+            elif kind == 'li':
+                cv.create_text(P(x1 + 24), P(y), text='·', anchor='nw', fill=C['tx2'], font=self.font(13, True))
+                t = cv.create_text(P(x1 + 36), P(y), text=text, anchor='nw', fill=C['tx'], font=self.font(12), width=P(x2 - x1 - 56))
+            elif kind == 'w':
+                y += 6; t = cv.create_text(P(x1 + 20), P(y), text=text, anchor='nw', fill=C['warn'], font=self.font(12), width=wrap)
+            else:
+                t = cv.create_text(P(x1 + 20), P(y), text=text, anchor='nw', fill=C['tx2'], font=self.font(12), width=wrap)
+            y = cv.bbox(t)[3] / self.k + (4 if kind == 'li' else 8)
+        y += 8; bw = (x2 - x1 - 40 - 10) / 2
+        self.button('dg_yes', x1 + 20, y, x1 + 20 + bw, y + 42, '동의하고 시작', 'gps', 'gold')
+        self.button('dg_no', x1 + 30 + bw, y, x2 - 20, y + 42, '거부하고 시작', 'power', 'dark')
+        y += 60
+        cv.delete(rid); rid = rrect(cv, P(x1), P(top), P(x2), P(y), P(R), fill=C['card'], outline=C['line']); cv.tag_lower(rid)
+        y += 18
+        if int(cv.cget('height')) != P(y):
+            cv.configure(height=P(y))
+
     def draw(self):
         S = self.St; cv, P = self.cv, self.px; cv.delete('all'); self.btns = {}
+        if self.consent_pending():
+            return self.draw_consent()
         x1, x2 = 20, W - 20; y = 18
         # 머리 카드
         rrect(cv, P(x1), P(y), P(x2), P(y + 182), P(R), fill=C['card'], outline=C['line'])
@@ -191,7 +240,19 @@ class App:
                 um = U.get('msg') or (f"지금 버전 v{self.meta['ver']}" if up.repo else '업데이트 저장소가 정해지지 않았어요')
                 cv.create_text(P(x1 + 18), P(y + 202), text=um, anchor='w', fill=C['red'] if U.get('state') == 'error' else C['tx2'], font=self.font(12), width=P(x2 - x1 - 190))
                 self.button('upd_chk', x2 - 18 - 150, y + 186, x2 - 18, y + 218, '업데이트 확인', 'refresh', 'dark')
-            info = f"웹소켓 ws://127.0.0.1:{self.meta['port']} · 연결 허용: azur-promilia.pages.dev\n게임 화면의 미니맵만 캡처해요 (메모리 읽기 없음 · 화면은 PC 밖으로 보내지 않음)"
+            d = self.dg()
+            if d:                                         # 로그 수집 · 진단 파일 (피드백) — 동의했을 때만 만들 수 있음
+                agreed = d.consent(S.cfg) == 'yes'
+                self.toggle('diag', x1 + 18, y + 118, '로그 수집 동의 (작동 문제 진단용 · 이 PC 에만 저장)', agreed)
+                if agreed:
+                    self.button('dg_zip', x1 + 18, y + 150, x2 - 18, y + 186, '진단 파일 만들기 (문의에 첨부)', 'down', 'dark')
+                else:
+                    rrect(cv, P(x1 + 18), P(y + 150), P(x2 - 18), P(y + 186), P(RB), fill=C['card2'], outline='')
+                    cv.create_text(P((x1 + x2) / 2), P(y + 168), text='진단 파일 만들기 — 로그 수집에 동의해야 쓸 수 있어요', fill=C['tx3'], font=self.font(12, True))
+                note = self.note or ('작동 문제 피드백(문의)은 진단 파일이 있어야 받을 수 있어요.' if not agreed else '')
+                if note:
+                    cv.create_text(P(x1 + 18), P(y + 204), text=note, anchor='w', fill=C['warn'] if not agreed else C['tx2'], font=self.font(11), width=P(x2 - x1 - 36))
+            info = f"웹소켓 ws://127.0.0.1:{self.meta['port']} · 연결 허용: azprguide.xyz · azur-promilia.pages.dev\n게임 화면의 미니맵만 캡처해요 (메모리 읽기 없음 · 화면은 PC 밖으로 보내지 않음)"
             if S.debug:
                 info += '\n' + S.debug
             cv.create_text(P(x1 + 18), P(y + 238), text=info, anchor='nw', fill=C['tx3'], font=self.font(11), width=P(x2 - x1 - 36))
@@ -236,6 +297,18 @@ class App:
                 webbrowser.open(u)
         elif k == 'upd_later':
             S.upd['hide'] = True
+        elif k in ('dg_yes', 'dg_no'):
+            self.set_consent(k == 'dg_yes')
+        elif k == 'diag':
+            self.set_consent(self.dg().consent(S.cfg) != 'yes'); self.note = ''
+        elif k == 'dg_zip':
+            try:
+                p = self.dg().make_zip(S)
+                self.note = f'바탕화면에 만들었어요: {os.path.basename(p)} — 문의하기에 첨부해 주세요' if p else '로그 수집에 동의해야 만들 수 있어요'
+                if p:
+                    subprocess.Popen(['explorer', '/select,', p])
+            except Exception as e:
+                self.note = f'진단 파일을 만들지 못했어요: {type(e).__name__}'
         self.draw()
 
     def quit(self):
@@ -249,7 +322,7 @@ class App:
         S = self.St; live = S.state == 'lock' and S.pos and time.time() - S.since < 2
         U = getattr(S, 'upd', None) or {}
         sig = (S.game, S.server, S.state, S.msg, S.clients, S.error, S.city, S.debug, S.gacha_count, S.gacha_status, tuple(round(v, 2) for v in S.pos) if live else None, self.hover, self.adv,
-               U.get('state'), U.get('msg'), U.get('hide'))
+               U.get('state'), U.get('msg'), U.get('hide'), S.cfg.get('diag'), S.cfg.get('diag_ver'), self.note)
         if sig != self.sig:
             self.sig = sig; self.draw()
         self.root.after(100, self.tick)

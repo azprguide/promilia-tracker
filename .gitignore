@@ -8,3 +8,5 @@ maps/
 promilia-tracker2.json
 promilia-tracker2-gacha*.json
 ocr-debug/
+promilia-tracker2-diag.log*
+PromiliaTracker-*.zip

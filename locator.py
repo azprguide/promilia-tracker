@@ -168,6 +168,7 @@ class Locator:
         self.px_per_m = px_per_m
         self.cur = None            # (MapData, u, v) — 붙어 있는 위치
         self.geom = None           # 화면에서 찾은 미니맵 테두리 (가운데 x, 가운데 y, 반지름) · 게임 창 안쪽 좌표
+        self.info = {}             # 마지막으로 못 찾은 이유와 점수 (진단 로그용 · diag.py)
 
     def detect(self, grab, w, h):
         """게임 화면에서 미니맵 테두리를 찾아 자리를 정함 (창 크기가 바뀌거나 오래 못 찾을 때) — grab(box) 는 창 안쪽 좌표로 캡처
@@ -220,8 +221,9 @@ class Locator:
 
     def locate(self, patch):
         """미니맵 조각 → (점수, MapData, u, v) 또는 None. 붙어 있으면 둘레만, 아니면 전체에서"""
-        if texture(patch) < 0.03:                          # 밋밋한 화면(메뉴 · 로딩 · 가려짐) — 미니맵이 아님
-            self.cur = None; return None
+        tx = texture(patch)
+        if tx < 0.03:                                      # 밋밋한 화면(메뉴 · 로딩 · 가려짐) — 미니맵이 아님
+            self.cur = None; self.info = {'why': '밋밋한 화면(메뉴·로딩·가려짐)', 'tex': round(tx, 3)}; return None
         if self.cur:
             mp, u, v = self.cur
             s, u2, v2 = self.fine(patch, mp, u, v)
@@ -230,10 +232,12 @@ class Locator:
             self.cur = None
         c = self.coarse(patch)
         if not c or c[0] < 0.6 or c[4] < 1.25:             # 전체에서 찾을 때는 점수가 높고(0.6↑) 한 곳만 뚜렷해야(둘째의 1.25배↑) 붙음
+            self.info = {'why': '지도와 맞는 곳 없음', 'tex': round(tx, 3), 'best_map': c[1].name if c else None, 'score': round(c[0], 3) if c else None, 'uniq': round(c[4], 2) if c else None}
             return None
         s0, mp, u, v, _ = c
         s, u2, v2 = self.fine(patch, mp, u, v, win=0.02)
         if s < 0.55:
+            self.info = {'why': '정밀 맞추기 실패', 'map': mp.name, 'coarse': round(s0, 3), 'fine': round(s, 3)}
             return None
-        self.cur = (mp, u2, v2)
+        self.cur = (mp, u2, v2); self.info = {}
         return s, mp, u2, v2

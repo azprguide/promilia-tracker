@@ -11,12 +11,13 @@
 """
 import asyncio, base64, hashlib, json, os, struct, sys, time, threading
 import ctypes, ctypes.wintypes as W
+import diag
 
 APP = '프로밀리아 가이드 트래커'
-VER = '2.0.2'
+VER = '2.0.3'
 PORT = 46822
 MAP_URL = 'https://azur-promilia.pages.dev/map'
-ORIGINS = ('https://azur-promilia.pages.dev', 'http://localhost:8791', 'http://127.0.0.1:8791')   # 이 사이트에서만 연결 허용
+ORIGINS = ('https://azur-promilia.pages.dev', 'https://azprguide.xyz', 'https://www.azprguide.xyz', 'http://localhost:8791', 'http://127.0.0.1:8791')   # 11-27: 새 도메인 azprguide.xyz 추가   # 이 사이트에서만 연결 허용
 WINDOW_TITLE = 'AzurPromilia'
 HERE = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__))
 CFG_PATH = os.path.join(HERE, 'promilia-tracker2.json')
@@ -42,6 +43,7 @@ class St:
     reconnect = threading.Event()
     quit = False
     cfg = {'auto': True}
+    hwnd = None
 
 
 def load_cfg():
@@ -64,7 +66,7 @@ def setstate(s, msg=''):
 
 def game_rect():
     """게임 창의 화면 안쪽 영역 (x, y, w, h) — 없거나 최소화면 None"""
-    h = u32.FindWindowW(None, WINDOW_TITLE)
+    h = u32.FindWindowW(None, WINDOW_TITLE); St.hwnd = h
     if not h or u32.IsIconic(h):
         return None
     rc = W.RECT(); pt = W.POINT(0, 0)
@@ -79,7 +81,8 @@ def worker():
     try:
         loc = locator.Locator(os.path.join(HERE, 'maps'), lambda s: setstate('idle', s), float(St.cfg.get('px_per_m') or locator.MM_PX_PER_M))
     except Exception as e:
-        St.error = f'지도 자료를 받지 못했어요 (인터넷 연결 확인): {type(e).__name__}'; setstate('idle', '지도 자료 없음'); return
+        St.error = f'지도 자료를 받지 못했어요 (인터넷 연결 확인): {type(e).__name__}'; setstate('idle', '지도 자료 없음'); diag.log('maps', ok=False, err=f'{type(e).__name__}: {e}'); return
+    diag.log('maps', ok=True, maps=[f'{m.name}({m.id}) tex={m.tex} size={m.size[0]:.0f}m ppm={loc.ppm(m):.2f}' for m in loc.maps])
     names = {m.id: m.name for m in loc.maps}
     St.scenes = names
     miss = 0; t_lock = 0.0; wsize = None
@@ -88,6 +91,7 @@ def worker():
         if St.reacquire.is_set() or St.reconnect.is_set():
             St.reacquire.clear(); St.reconnect.clear(); loc.cur = None
         r = game_rect()
+        diag.game(getattr(St, 'hwnd', None), r)
         if not r:
             St.game = 'off'; St.pos = None; loc.cur = None; setstate('nogame', '게임 창을 찾는 중…'); time.sleep(1); continue
         St.game = 'on'; x, y, w, h = r
@@ -96,13 +100,15 @@ def worker():
             try:
                 g, sc = loc.detect(lambda b: capture.grab((x + b[0], y + b[1], x + b[2], y + b[3])), w, h)
                 St.debug = f'미니맵 자리 {g} (테두리 {sc:.2f})' if g else f'미니맵 테두리를 못 찾아 기본 자리를 씀 ({sc:.2f})'
+                diag.log('ring', w=w, h=h, ratio=diag.ratio(w, h), found=bool(g), geom=[int(v) for v in g] if g else None, score=round(sc, 3), crop=list(loc.crop_box(w, h)))
             except Exception as e:
-                loc.geom = None; St.debug = f'미니맵 자리 찾기 실패: {type(e).__name__}'
+                loc.geom = None; St.debug = f'미니맵 자리 찾기 실패: {type(e).__name__}'; diag.log('error', where='ring', err=f'{type(e).__name__}: {e}')
         try:
             bx = loc.crop_box(w, h); img = capture.grab((x + bx[0], y + bx[1], x + bx[2], y + bx[3]))
             res = loc.locate(img)
+            diag.frame(res, img, loc.info)
         except Exception as e:
-            res = None; St.debug = f'화면을 읽지 못했어요: {type(e).__name__}'
+            res = None; St.debug = f'화면을 읽지 못했어요: {type(e).__name__}'; diag.once('caperr', 'error', where='capture', err=f'{type(e).__name__}: {e}')
         if res:
             s, mp, u, v = res; St.score = s; miss = 0
             if not t_lock:
@@ -146,10 +152,11 @@ async def client(r, w):
         req = (await r.readuntil(b'\r\n\r\n')).decode('latin-1')
         hdr = {k.strip().lower(): v.strip() for k, v in (l.split(':', 1) for l in req.split('\r\n')[1:] if ':' in l)}
         if hdr.get('origin') not in ORIGINS or 'sec-websocket-key' not in hdr:
+            diag.log('ws', ok=False, origin=hdr.get('origin', '')[:80], reason='허용 안 된 사이트' if hdr.get('origin') not in ORIGINS else '웹소켓 아님')
             w.write(b'HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n'); await w.drain(); w.close(); return
         acc = base64.b64encode(hashlib.sha1((hdr['sec-websocket-key'] + GUID).encode()).digest()).decode()
         w.write(f'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {acc}\r\n\r\n'.encode())
-        await w.drain(); St.clients += 1; counted = True
+        await w.drain(); St.clients += 1; counted = True; diag.log('ws', ok=True, origin=hdr.get('origin'), clients=St.clients)
 
         async def rx():
             while True:
@@ -195,7 +202,7 @@ def server_thread():
         try:
             srv = await asyncio.start_server(client, '127.0.0.1', PORT)
         except OSError as e:
-            St.server = 'error'; St.error = f'웹소켓 포트 {PORT} 를 열 수 없어요 (트래커가 이미 켜져 있는지 확인해 주세요): {e}'; return
+            St.server = 'error'; St.error = f'웹소켓 포트 {PORT} 를 열 수 없어요 (트래커가 이미 켜져 있는지 확인해 주세요): {e}'; diag.log('server', ok=False, port=PORT, err=str(e)); return
         St.server = 'on'
         async with srv:
             while not St.quit:
@@ -209,6 +216,7 @@ def main():
     except Exception:
         pass
     load_cfg()
+    diag.init(St.cfg, HERE, VER)                                         # 진단 로그 (동의했을 때만 · diag.py)
     threading.Thread(target=server_thread, daemon=True).start()
     threading.Thread(target=worker, daemon=True).start()
     try:                                                             # 관측 기록 모으기 (화면 글자 인식)
@@ -225,7 +233,7 @@ def main():
     else:
         import gui
         ico = os.path.join(getattr(sys, '_MEIPASS', HERE), 'assets', 'tracker.ico')
-        gui.App(St, save_cfg, {'app': APP, 'ver': VER, 'port': PORT, 'map': MAP_URL, 'ico': ico, 'admin': lambda: True}).run()
+        gui.App(St, save_cfg, {'app': APP, 'ver': VER, 'port': PORT, 'map': MAP_URL, 'ico': ico, 'admin': lambda: True, 'diag': diag}).run()
 
 
 if __name__ == '__main__':
