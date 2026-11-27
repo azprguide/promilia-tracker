@@ -14,9 +14,12 @@ import ctypes, ctypes.wintypes as W
 import diag
 
 APP = '프로밀리아 가이드 트래커'
-VER = '2.0.3'
+VER = '2.1.1'   # 11-28: 미니맵 테두리 오인식 거르기 · 기본 자리 번갈아 시험 (1080p 진단 로그)
 PORT = 46822
-MAP_URL = 'https://azur-promilia.pages.dev/map'
+MAP_URL = 'https://azprguide.xyz/map'   # 11-27: 사이트 새 주소 (지도 자료는 locator.py 가 받음)
+# 새 버전 안내 (updater.py · 11-27): 이 저장소 Releases 에서 앞말 없는 태그(2.1.0 · v2.1.0)만 이 트래커의 새 버전으로 봄 — 메모리 트래커는 'mem-' 태그
+REPO = 'azprguide/promilia-tracker'
+TAG_PREFIX = ''
 ORIGINS = ('https://azur-promilia.pages.dev', 'https://azprguide.xyz', 'https://www.azprguide.xyz', 'http://localhost:8791', 'http://127.0.0.1:8791')   # 11-27: 새 도메인 azprguide.xyz 추가   # 이 사이트에서만 연결 허용
 WINDOW_TITLE = 'AzurPromilia'
 HERE = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__))
@@ -100,12 +103,17 @@ def worker():
             try:
                 g, sc = loc.detect(lambda b: capture.grab((x + b[0], y + b[1], x + b[2], y + b[3])), w, h)
                 St.debug = f'미니맵 자리 {g} (테두리 {sc:.2f})' if g else f'미니맵 테두리를 못 찾아 기본 자리를 씀 ({sc:.2f})'
-                diag.log('ring', w=w, h=h, ratio=diag.ratio(w, h), found=bool(g), geom=[int(v) for v in g] if g else None, score=round(sc, 3), crop=list(loc.crop_box(w, h)))
+                diag.log('ring', w=w, h=h, ratio=diag.ratio(w, h), found=bool(g), geom=[int(v) for v in g] if g else None, score=round(sc, 3), crop=list(loc.crop_box(w, h)),
+                         cand=loc.cand, expect=[[round(v) for v in e] for e in loc.expected(w, h)], win=[x, y, w, h])   # 11-28: 후보 · 버린 이유 · 예상 자리 · 게임 창
             except Exception as e:
                 loc.geom = None; St.debug = f'미니맵 자리 찾기 실패: {type(e).__name__}'; diag.log('error', where='ring', err=f'{type(e).__name__}: {e}')
         try:
-            bx = loc.crop_box(w, h); img = capture.grab((x + bx[0], y + bx[1], x + bx[2], y + bx[3]))
+            # 11-28: 찾은 테두리 자리로 6번 넘게 못 찾으면 기본 자리도 번갈아 시험 → 기본 자리에서 찾으면 찾은 테두리를 버림 (테두리 오인식에 묶여 있지 않게)
+            alt = bool(loc.geom) and miss >= 6 and miss % 2 == 1
+            bx = loc.crop_box(w, h, use_geom=not alt); img = capture.grab((x + bx[0], y + bx[1], x + bx[2], y + bx[3]))
             res = loc.locate(img)
+            if res and alt:
+                diag.log('ring', drop=[int(v) for v in loc.geom], why='기본 자리에서 찾음'); loc.geom = None
             diag.frame(res, img, loc.info)
         except Exception as e:
             res = None; St.debug = f'화면을 읽지 못했어요: {type(e).__name__}'; diag.once('caperr', 'error', where='capture', err=f'{type(e).__name__}: {e}')
@@ -177,7 +185,7 @@ async def client(r, w):
                         pass
         task = asyncio.create_task(rx()); last = None
         while not task.done() and not St.quit:
-            msg = {'t': 'pos', 'app': 'promilia-tracker', 'v': 1, 'state': St.state, 'msg': St.msg, 'src': 'screen', 'gacha': St.gacha_count}
+            msg = {'t': 'pos', 'app': 'promilia-tracker', 'v': 1, 'ver': VER, 'state': St.state, 'msg': St.msg, 'src': 'screen', 'gacha': St.gacha_count}
             if St.state == 'lock' and St.pos and time.time() - St.since < 2:
                 msg.update(x=round(float(St.pos[0]), 2), y=round(float(St.pos[1]), 2), z=round(float(St.pos[2]), 2))
                 if St.city:
@@ -231,9 +239,13 @@ def main():
         except KeyboardInterrupt:
             St.quit = True
     else:
-        import gui
+        import gui, updater
+        upd = updater.Updater(St, St.cfg.get('repo') or REPO, VER, APP, prefix=TAG_PREFIX, auto=lambda: St.cfg.get('autoupdate', True))
+        upd.start_auto()                                             # 켤 때 + 켜 둔 동안 6시간마다 조용히 확인 (설정에서 끌 수 있음)
         ico = os.path.join(getattr(sys, '_MEIPASS', HERE), 'assets', 'tracker.ico')
-        gui.App(St, save_cfg, {'app': APP, 'ver': VER, 'port': PORT, 'map': MAP_URL, 'ico': ico, 'admin': lambda: True, 'diag': diag}).run()
+        gui.App(St, save_cfg, {'app': APP, 'ver': VER, 'port': PORT, 'map': MAP_URL, 'ico': ico, 'admin': lambda: True, 'diag': diag,
+                               'upd': upd, 'repo_url': upd.repo_page(), 'toggles': [('auto', '게임 창 자동 찾기')],
+                               'info': f'웹소켓 ws://127.0.0.1:{PORT} · 연결 허용: azprguide.xyz · azur-promilia.pages.dev\n게임 화면의 미니맵만 캡처해요 (메모리 읽기 없음 · 화면은 PC 밖으로 보내지 않음)'}).run()
 
 
 if __name__ == '__main__':

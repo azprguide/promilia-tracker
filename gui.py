@@ -1,4 +1,6 @@
-"""프로밀리아 가이드 트래커 화면 (promilia-tracker 의 gui.py 를 가져와 화면 인식 방식에 맞게 고침 · tkinter)
+"""프로밀리아 가이드 트래커 화면 — 두 트래커 공용 (promilia-tracker2 화면 인식 · promilia-tracker 메모리에 같은 파일 · tkinter)
+트래커마다 다른 것은 meta 로 받음: app · ver · port · map · ico · admin(권한 확인) · admin_msg · diag(diag 모듈) · upd(updater.Updater)
+  · repo_url(GitHub 버튼) · toggles([(설정 키, 이름)]) · info(고급 설정 아래 안내 글) · gacha_hint(관측 기록 카드 안내) · lite(관측 기록 카드 숨김)
 
 라운디드 스퀘어 카드 · 버튼은 캔버스에 직접 그림 (작은 R · 프로밀리아 가이드 사이트와 같은 금색 · 어두운 배경)
 글꼴: Noto Serif KR(사이트와 같은 글꼴 · Windows 11 기본 포함) → 없으면 맑은 고딕
@@ -51,6 +53,12 @@ def icon(cv, kind, cx, cy, s, col, tag):
         cv.create_line(cx, cy - h * .85, cx, cy + h * .35, **kw)
         cv.create_line(cx - h * .5, cy - h * .1, cx, cy + h * .4, cx + h * .5, cy - h * .1, **kw)
         cv.create_line(cx - h * .85, cy + h * .85, cx + h * .85, cy + h * .85, **kw)
+    elif kind == 'gh':                        # GitHub 저장소 (갈래 아이콘: 점 3개 + 줄기)
+        r_ = h * .24
+        for px_, py_ in ((-h * .45, -h * .65), (-h * .45, h * .65), (h * .5, -h * .3)):
+            cv.create_oval(cx + px_ - r_, cy + py_ - r_, cx + px_ + r_, cy + py_ + r_, outline=col, width=w, tags=tag)
+        cv.create_line(cx - h * .45, cy - h * .41, cx - h * .45, cy + h * .41, **kw)
+        cv.create_line(cx + h * .5, cy - h * .06, cx + h * .5, cy + h * .05, cx - h * .2, cy + h * .4, **kw)
     elif kind == 'star':                      # 로고 ✦
         k = h; pts = []
         for i in range(8):
@@ -78,6 +86,10 @@ class App:
         self.cv = tk.Canvas(self.root, width=self.px(W), height=self.px(600), bg=C['bg'], highlightthickness=0); self.cv.pack()
         self.hover = None; self.adv = False; self.btns = {}; self.note = ''
         self.cv.bind('<Motion>', self.on_move); self.cv.bind('<Button-1>', self.on_click); self.cv.bind('<Leave>', lambda e: self.set_hover(None))
+        # 창이 화면보다 길어지면(새 버전 카드 + 고급 설정을 펼친 경우 등 · 1080p 화면) 화면 높이에 맞추고 마우스 휠로 내려 봄 (11-27)
+        self.cv.configure(yscrollincrement=self.px(40))
+        self.cv.bind('<MouseWheel>', lambda e: self.cv.yview_scroll(int(-e.delta / 120), 'units') if self.cv.bbox('all') and self.full_h > int(self.cv.cget('height')) else None)
+        self.full_h = 0
         self.root.protocol('WM_DELETE_WINDOW', self.quit)
         self.sig = None; self.tick()
 
@@ -159,8 +171,17 @@ class App:
         y += 60
         cv.delete(rid); rid = rrect(cv, P(x1), P(top), P(x2), P(y), P(R), fill=C['card'], outline=C['line']); cv.tag_lower(rid)
         y += 18
-        if int(cv.cget('height')) != P(y):
-            cv.configure(height=P(y))
+        self.fit(y)
+
+    def fit(self, y):
+        """창 높이 = 내용 높이 (화면보다 길면 화면 높이까지 · 나머지는 마우스 휠로)"""
+        full = self.px(y); self.full_h = full
+        h = min(full, self.root.winfo_screenheight() - self.px(90))
+        self.cv.configure(scrollregion=(0, 0, self.px(W), full))
+        if int(self.cv.cget('height')) != h:
+            self.cv.configure(height=h)
+        if full <= h:
+            self.cv.yview_moveto(0)
 
     def draw(self):
         S = self.St; cv, P = self.cv, self.px; cv.delete('all'); self.btns = {}
@@ -187,16 +208,20 @@ class App:
         # 새 버전 안내 카드 (updater.py) — 새 버전이 있을 때만 · 업데이트는 사용자가 릴리스 페이지에서 직접 받음(강제 업데이트 없음) · 「나중에」로 이번 실행 동안 숨김
         U = getattr(S, 'upd', None) or {}; up = self.meta.get('upd')
         if up and U.get('state') == 'avail' and not U.get('hide'):
-            h = 120
-            rrect(cv, P(x1), P(y), P(x2), P(y + h), P(R), fill=C['card'], outline=C['gold2'])
+            top = y                                       # 카드 높이는 요약 글 줄 수에 맞춤 (11-27 · 두 줄이면 버튼과 겹쳤음)
+            rid = rrect(cv, P(x1), P(y), P(x2), P(y + 10), P(R), fill=C['card'], outline=C['gold2'])
             icon(cv, 'down', P(x1 + 30), P(y + 26), P(18), C['gold'], 'upi')
             cv.create_text(P(x1 + 48), P(y + 26), text=U.get('msg') or '', anchor='w', fill=C['tx'], font=self.font(14, True), width=P(x2 - x1 - 70))
             note = (U.get('notes') or '').split('\n')[0] or f"지금 v{self.meta['ver']} → 새 v{U.get('ver')}"
-            cv.create_text(P(x1 + 18), P(y + 52), text=note, anchor='w', fill=C['tx2'], font=self.font(12), width=P(x2 - x1 - 36))
+            note = note if len(note) <= 90 else note[:88].rstrip() + '…'
+            t = cv.create_text(P(x1 + 18), P(y + 44), text=note, anchor='nw', fill=C['tx2'], font=self.font(12), width=P(x2 - x1 - 36))
+            by = cv.bbox(t)[3] / self.k + 10
             hw = (x2 - x1 - 36 - 8) * 0.68
-            self.button('upd_page', x1 + 18, y + 70, x1 + 18 + hw, y + 104, '다운로드 페이지 열기', 'down', 'gold')
-            self.button('upd_later', x1 + 26 + hw, y + 70, x2 - 18, y + 104, '나중에', 'refresh', 'dark')
-            y += h + 14        # 위치 카드
+            self.button('upd_page', x1 + 18, by, x1 + 18 + hw, by + 34, '다운로드 페이지 열기', 'down', 'gold')
+            self.button('upd_later', x1 + 26 + hw, by, x2 - 18, by + 34, '나중에', 'refresh', 'dark')
+            y = by + 34 + 16
+            cv.delete(rid); rid = rrect(cv, P(x1), P(top), P(x2), P(y), P(R), fill=C['card'], outline=C['gold2']); cv.tag_lower(rid)
+            y += 14            # 위치 카드
         rrect(cv, P(x1), P(y), P(x2), P(y + 214), P(R), fill=C['card'], outline=C['line'])
         live = S.state == 'lock' and S.pos and time.time() - S.since < 2
         icon(cv, 'gps', P(x1 + 30), P(y + 28), P(18), C['gold'] if live else C['tx3'], 'gps')
@@ -218,52 +243,64 @@ class App:
             rrect(cv, P(x1), P(y), P(x2), P(y + 124), P(R), fill=C['card'], outline=C['line'])
             icon(cv, 'star', P(x1 + 30), P(y + 28), P(18), C['gold'] if S.gacha_count else C['tx3'], 'gstar')
             cv.create_text(P(x1 + 48), P(y + 28), text=f'관측 기록 {S.gacha_count:,}건', anchor='w', fill=C['tx'], font=self.font(16, True))
-            cv.create_text(P(x1 + 18), P(y + 56), text=S.gacha_status or '게임에서 관측 → 확률 설명 → 기록 화면을 열고 쪽을 넘기면 모여요', anchor='w', fill=C['tx2'], font=self.font(12), width=P(x2 - x1 - 36))
+            cv.create_text(P(x1 + 18), P(y + 56), text=S.gacha_status or self.meta.get('gacha_hint') or '게임에서 관측 → 확률 설명 → 기록 화면을 열고 쪽을 넘기면 모여요', anchor='w', fill=C['tx2'], font=self.font(12), width=P(x2 - x1 - 36))
             self.button('gacha', x1 + 18, y + 72, x2 - 18, y + 110, '나의 관측 결산 열기', 'map', 'dark')
+        y += 0 if lite else 138
+        # GitHub 저장소 (11-27): 새 버전 · 사용 방법 · 소스 — 고급 설정 바로 위
+        if self.meta.get('repo_url'):
+            self.button('gh', x1, y, x2, y + 44, 'GitHub 열기 (새 버전 · 사용 방법)', 'gh', 'dark')
+            y += 56
         # 고급 설정
-        y += 0 if lite else 138; tag = 'b_adv'
+        tag = 'b_adv'
         rrect(cv, P(x1), P(y), P(x2), P(y + 46), P(R), fill=C['card'], outline=C['line'], tags=tag)
         cv.create_text(P(x1 + 18), P(y + 23), text='고급 설정', anchor='w', fill=C['tx'], font=self.font(14, True), tags=tag)
         cv.create_text(P(x2 - 20), P(y + 23), text='▴' if self.adv else '▾', fill=C['tx2'], font=self.font(14), tags=tag)
         self.btns['adv'] = (x1, y, x2, y + 46); y += 46
         if self.adv:
-            y += 10; h = 296
-            rrect(cv, P(x1), P(y), P(x2), P(y + h), P(R), fill=C['card'], outline=C['line'])
-            err = S.error or ('' if self.meta['admin']() else '')
-            rrect(cv, P(x1 + 18), P(y + 16), P(x2 - 18), P(y + 66), P(RB), fill=C['card2'], outline='')
-            cv.create_text(P(x1 + 32), P(y + 41), text=err or '현재 보고된 트래커 오류 없음', anchor='w', fill=C['red'] if err else C['tx2'], font=self.font(12), width=P(x2 - x1 - 64))
-            self.toggle('auto', x1 + 18, y + 84, '게임 창 자동 찾기', S.cfg.get('auto', True))
-            if self.meta.get('upd'):
-                self.toggle('autoupdate', x1 + 18, y + 152, '켤 때 새 버전 확인 (GitHub 릴리스)', S.cfg.get('autoupdate', True))
+            # 11-27: 항목을 위에서부터 차례로 쌓음 (예전엔 자리를 숫자로 박아 두어 업데이트 · 로그 항목이 함께 있으면 겹쳤음) — 카드는 다 그린 뒤 높이에 맞춰 뒤에 깖
+            y += 10; top = y; y += 16
+            rid = rrect(cv, P(x1), P(top), P(x2), P(top + 10), P(R), fill=C['card'], outline=C['line'])
+            adm = self.meta.get('admin')
+            err = S.error or ('' if (not adm or adm()) else self.meta.get('admin_msg', ''))
+            rrect(cv, P(x1 + 18), P(y), P(x2 - 18), P(y + 50), P(RB), fill=C['card2'], outline='')
+            cv.create_text(P(x1 + 32), P(y + 25), text=err or '현재 보고된 트래커 오류 없음', anchor='w', fill=C['red'] if err else C['tx2'], font=self.font(12), width=P(x2 - x1 - 64))
+            y += 66
+            for key, label in self.meta.get('toggles') or [('auto', '게임 창 자동 찾기')]:
+                self.toggle(key, x1 + 18, y, label, S.cfg.get(key, True)); y += 34
             up = self.meta.get('upd')
-            if up:
+            if up:                                        # 새 버전 확인
+                self.toggle('autoupdate', x1 + 18, y, '켤 때 · 켜 둔 동안 새 버전 확인 (GitHub 릴리스)', S.cfg.get('autoupdate', True)); y += 34
                 um = U.get('msg') or (f"지금 버전 v{self.meta['ver']}" if up.repo else '업데이트 저장소가 정해지지 않았어요')
-                cv.create_text(P(x1 + 18), P(y + 202), text=um, anchor='w', fill=C['red'] if U.get('state') == 'error' else C['tx2'], font=self.font(12), width=P(x2 - x1 - 190))
-                self.button('upd_chk', x2 - 18 - 150, y + 186, x2 - 18, y + 218, '업데이트 확인', 'refresh', 'dark')
+                cv.create_text(P(x1 + 18), P(y + 16), text=um, anchor='w', fill=C['red'] if U.get('state') == 'error' else C['tx2'], font=self.font(12), width=P(x2 - x1 - 190))
+                self.button('upd_chk', x2 - 18 - 150, y, x2 - 18, y + 32, '업데이트 확인', 'refresh', 'dark'); y += 46
             d = self.dg()
             if d:                                         # 로그 수집 · 진단 파일 (피드백) — 동의했을 때만 만들 수 있음
                 agreed = d.consent(S.cfg) == 'yes'
-                self.toggle('diag', x1 + 18, y + 118, '로그 수집 동의 (작동 문제 진단용 · 이 PC 에만 저장)', agreed)
+                self.toggle('diag', x1 + 18, y, '로그 수집 동의 (작동 문제 진단용 · 이 PC 에만 저장)', agreed); y += 34
                 if agreed:
-                    self.button('dg_zip', x1 + 18, y + 150, x2 - 18, y + 186, '진단 파일 만들기 (문의에 첨부)', 'down', 'dark')
+                    self.button('dg_zip', x1 + 18, y, x2 - 18, y + 36, '진단 파일 만들기 (문의에 첨부)', 'down', 'dark')
                 else:
-                    rrect(cv, P(x1 + 18), P(y + 150), P(x2 - 18), P(y + 186), P(RB), fill=C['card2'], outline='')
-                    cv.create_text(P((x1 + x2) / 2), P(y + 168), text='진단 파일 만들기 — 로그 수집에 동의해야 쓸 수 있어요', fill=C['tx3'], font=self.font(12, True))
+                    rrect(cv, P(x1 + 18), P(y), P(x2 - 18), P(y + 36), P(RB), fill=C['card2'], outline='')
+                    cv.create_text(P((x1 + x2) / 2), P(y + 18), text='진단 파일 만들기 — 로그 수집에 동의해야 쓸 수 있어요', fill=C['tx3'], font=self.font(12, True))
+                y += 44
                 note = self.note or ('작동 문제 피드백(문의)은 진단 파일이 있어야 받을 수 있어요.' if not agreed else '')
                 if note:
-                    cv.create_text(P(x1 + 18), P(y + 204), text=note, anchor='w', fill=C['warn'] if not agreed else C['tx2'], font=self.font(11), width=P(x2 - x1 - 36))
-            info = f"웹소켓 ws://127.0.0.1:{self.meta['port']} · 연결 허용: azprguide.xyz · azur-promilia.pages.dev\n게임 화면의 미니맵만 캡처해요 (메모리 읽기 없음 · 화면은 PC 밖으로 보내지 않음)"
+                    t = cv.create_text(P(x1 + 18), P(y), text=note, anchor='nw', fill=C['warn'] if not agreed else C['tx2'], font=self.font(11), width=P(x2 - x1 - 36))
+                    y = cv.bbox(t)[3] / self.k + 8
+            info = self.meta.get('info') or ''
             if S.debug:
-                info += '\n' + S.debug
-            cv.create_text(P(x1 + 18), P(y + 238), text=info, anchor='nw', fill=C['tx3'], font=self.font(11), width=P(x2 - x1 - 36))
-            y += h
+                info += ('\n' if info else '') + S.debug
+            if info:
+                y += 4; t = cv.create_text(P(x1 + 18), P(y), text=info, anchor='nw', fill=C['tx3'], font=self.font(11), width=P(x2 - x1 - 36))
+                y = cv.bbox(t)[3] / self.k
+            y += 16
+            cv.delete(rid); rid = rrect(cv, P(x1), P(top), P(x2), P(y), P(R), fill=C['card'], outline=C['line']); cv.tag_lower(rid)
         y += 18
-        if int(cv.cget('height')) != P(y):
-            cv.configure(height=P(y))
+        self.fit(y)
 
     # ---------- 입력 ----------
     def hit(self, e):
-        x, y = e.x / self.k, e.y / self.k
+        x, y = self.cv.canvasx(e.x) / self.k, self.cv.canvasy(e.y) / self.k   # 스크롤한 만큼 더함
         return next((k for k, (a, b, c, d) in self.btns.items() if a <= x <= c and b <= y <= d), None)
 
     def set_hover(self, k):
@@ -285,6 +322,8 @@ class App:
             webbrowser.open(self.meta['map'])
         elif k == 'gacha':
             webbrowser.open(self.meta['map'].rsplit('/', 1)[0] + '/gacha-record')
+        elif k == 'gh' and self.meta.get('repo_url'):
+            webbrowser.open(self.meta['repo_url'])
         elif k == 'adv':
             self.adv = not self.adv
         elif k in ('auto', 'motion', 'autoupdate'):
@@ -325,6 +364,14 @@ class App:
                U.get('state'), U.get('msg'), U.get('hide'), S.cfg.get('diag'), S.cfg.get('diag_ver'), self.note)
         if sig != self.sig:
             self.sig = sig; self.draw()
+        # 새 버전이 처음 확인되면 작업 표시줄 아이콘을 깜빡여 알림 (창을 내려 둔 경우 · 11-27)
+        if U.get('state') == 'avail' and U.get('ver') and U.get('ver') != getattr(self, 'flashed', None):
+            self.flashed = U.get('ver')
+            try:
+                hwnd = __import__('ctypes').windll.user32.GetParent(self.root.winfo_id())
+                __import__('ctypes').windll.user32.FlashWindow(hwnd, True)
+            except Exception:
+                pass
         self.root.after(100, self.tick)
 
     def run(self):

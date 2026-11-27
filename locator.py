@@ -169,6 +169,7 @@ class Locator:
         self.cur = None            # (MapData, u, v) — 붙어 있는 위치
         self.geom = None           # 화면에서 찾은 미니맵 테두리 (가운데 x, 가운데 y, 반지름) · 게임 창 안쪽 좌표
         self.info = {}             # 마지막으로 못 찾은 이유와 점수 (진단 로그용 · diag.py)
+        self.cand = {}             # 마지막 테두리 후보 (자리 · 점수 · 버린 이유) — 진단 로그용
 
     def detect(self, grab, w, h):
         """게임 화면에서 미니맵 테두리를 찾아 자리를 정함 (창 크기가 바뀌거나 오래 못 찾을 때) — grab(box) 는 창 안쪽 좌표로 캡처
@@ -177,12 +178,35 @@ class Locator:
         side = max(0, (w - h * 16 / 9) / 2)                  # 16:9 보다 넓으면 가운데 정렬 때 왼쪽 여백
         rw, rh = int(min(w, side + (RING_CX + RING_R) * k_hi + 40)), int(min(h, (RING_CY + RING_R) * k_hi + 40))
         cx, cy, R, sc = find_ring(grab((0, 0, rw, rh)), k_lo, k_hi)
-        self.geom = (cx, cy, R) if sc > 0.06 else None
+        ok, why = sc > 0.06, '' if sc > 0.06 else '테두리 점수 낮음'
+        if ok:   # 11-28: 자리 · 크기가 말이 되는지 — 1080p 진단에서 배경의 밝은 무늬(점수 0.09~0.10)를 테두리로 잡아 미니맵 대신 풀숲을 자르던 것
+            ok, why = self.plausible(cx, cy, R, w, h)
+        self.cand = {'at': [int(cx), int(cy), int(R)], 'score': round(float(sc), 3), 'why': why}
+        self.geom = (cx, cy, R) if ok else None
         return self.geom, sc
 
-    def crop_box(self, w, h):
-        """게임 화면(클라이언트 영역 w×h)에서 미니맵을 자를 자리 — 찾은 테두리가 있으면 그 기준(비교 반지름 = 테두리 × 150/184)"""
-        if self.geom:
+    @staticmethod
+    def expected(w, h):
+        """화면 비율로 본 미니맵 테두리의 예상 자리들 [(가운데 x, 가운데 y, 반지름)] — 세로 비례 · 가로 비례 · 넓은 화면 가운데 정렬"""
+        kh, kw = h / 2160, w / 3840; side = max(0, (w - h * 16 / 9) / 2); out = []
+        for k, dx in ((kh, 0), (kw, 0), (kh, side)):
+            out.append((dx + RING_CX * k, RING_CY * k, RING_R * k))
+        return out
+
+    def plausible(self, cx, cy, R, w, h):
+        """찾은 테두리가 예상 자리 중 하나와 가까운지(가운데 거리 ≤ 예상 반지름의 45%) · 크기가 비슷한지(0.75 ~ 1.3배)"""
+        best = min(self.expected(w, h), key=lambda e: math.hypot(cx - e[0], cy - e[1]))
+        ex, ey, er = best
+        if math.hypot(cx - ex, cy - ey) > er * 0.45:
+            return False, f'예상 자리({ex:.0f},{ey:.0f})와 멂'
+        if not (er * 0.75 <= R <= er * 1.3):
+            return False, f'크기가 예상({er:.0f})과 다름'
+        return True, ''
+
+    def crop_box(self, w, h, use_geom=True):
+        """게임 화면(클라이언트 영역 w×h)에서 미니맵을 자를 자리 — 찾은 테두리가 있으면 그 기준(비교 반지름 = 테두리 × 150/184)
+        use_geom=False 면 찾은 테두리를 무시하고 기본 자리(세로 비례 · 왼쪽 위) — 찾은 자리로 계속 실패할 때 번갈아 시험 (tracker2.py)"""
+        if self.geom and use_geom:
             cx, cy, R = self.geom; r = R * MM_R / RING_R
             return int(round(cx - r)), int(round(cy - r)), int(round(cx + r)), int(round(cy + r))
         k = h / 2160

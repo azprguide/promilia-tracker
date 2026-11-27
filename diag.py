@@ -1,9 +1,14 @@
-"""진단 로그 (2026-11-27) — 사용자가 동의했을 때만, 이 PC(exe 옆 promilia-tracker2-diag.log)에만 적음. 어디로도 자동으로 보내지 않음.
-「진단 파일 만들기」를 누르면 로그 + 지금 환경 요약 + (위치를 못 찾을 때의) 미니맵 조각 최근 3장을 ZIP 하나로 바탕화면에 만듦 → 사용자가 직접 문의에 첨부.
+"""진단 로그 — 두 트래커 공용 (promilia-tracker2 · promilia-tracker 에 같은 파일 · init 의 kind 로 나눔)
+사용자가 동의했을 때만, 이 PC(exe 옆 로그 파일)에만 적음. 어디로도 자동으로 보내지 않음.
+「진단 파일 만들기」를 누르면 로그 + 지금 환경 요약 + (화면 인식 트래커: 위치를 못 찾을 때의 미니맵 조각 최근 3장)을 ZIP 하나로 바탕화면에 만듦 → 사용자가 직접 문의에 첨부.
 
-수집: 트래커 버전 · Windows 버전 · 모니터 해상도 · 배율 · 개수 · 게임 창 크기 · 비율 · 위치 · 창 모드 · 미니맵 자리 · 점수 · 위치 맞추기 결과 ·
-      지도 자료 받기 결과 · 사이트 연결 기록(사이트 주소 · 허용 여부) · 오류
-수집 안 함: 전체 화면 · 다른 창 · 게임 UID · 관측 기록 · 글자 인식 내용 · PC 이름 · Windows 사용자 이름(경로는 ~ 로 가림) · IP
+화면 인식(ocr · promilia-tracker2-diag.log)
+  수집: 트래커 버전 · Windows 버전 · 모니터 해상도 · 배율 · 개수 · 게임 창 크기 · 비율 · 위치 · 창 모드 · 미니맵 자리 · 점수 · 위치 맞추기 결과 ·
+        지도 자료 받기 결과 · 사이트 연결 기록(사이트 주소 · 허용 여부) · 오류
+  수집 안 함: 전체 화면 · 다른 창 · 게임 UID · 관측 기록 · 글자 인식 내용 · PC 이름 · Windows 사용자 이름(경로는 ~ 로 가림) · IP
+메모리(mem · promilia-tracker-diag.log · 11-27)
+  수집: 트래커 버전 · Windows 버전 · 모니터 · 게임 실행 여부 · 관리자 권한 · 좌표 찾기 결과(방식 · 걸린 시간 · 찾은 필드 위치) · 지역 번호 · 사이트 연결 기록 · 오류
+  수집 안 함: 게임 메모리 내용 · 게임 UID · 관측 기록 · PC 이름 · 사용자 이름 · IP
 거부하면 아무것도 적지 않고, 진단 파일(피드백)도 만들 수 없음. 동의 · 거부는 고급 설정에서 바꿀 수 있음.
 """
 import collections, ctypes, ctypes.wintypes as W, io, json, os, platform, threading, time, zipfile
@@ -11,6 +16,19 @@ import collections, ctypes, ctypes.wintypes as W, io, json, os, platform, thread
 CONSENT_VER = 1                     # 안내 내용이 바뀌면 올림 → 다시 물어봄
 MAX_BYTES = 1024 * 1024             # 로그 파일 1MB 넘으면 .1 로 넘기고 새로 (최근 것만 남김)
 NOTICE_TITLE = '로그 수집 안내'
+LOG_NAME = {'ocr': 'promilia-tracker2-diag.log', 'mem': 'promilia-tracker-diag.log'}
+NOTICE_MEM = [
+    ('p', '트래커가 잘 작동하지 않을 때(내 위치를 못 찾는 등) 원인을 찾기 위해, 작동 기록(로그)을 이 PC 에만 저장해요. 자동으로 어디에도 보내지 않아요.'),
+    ('p', '문제가 생기면 고급 설정의 「진단 파일 만들기」로 만든 파일을 문의에 직접 첨부해 주세요.'),
+    ('h', '수집하는 것'),
+    ('li', '트래커 버전 · Windows 버전 · 모니터 해상도 · 배율'),
+    ('li', '게임 실행 여부 · 관리자 권한으로 실행했는지'),
+    ('li', '좌표 찾기 결과(찾은 방식 · 걸린 시간 · 찾은 자료 위치) · 지역 번호'),
+    ('li', '사이트 연결 기록(연결한 사이트 주소 · 허용 여부) · 오류 내용'),
+    ('h', '수집하지 않는 것'),
+    ('li', '게임 메모리 내용, 게임 UID · 관측 기록, PC 이름 · 사용자 이름 · IP'),
+    ('w', '거부해도 트래커는 그대로 쓸 수 있어요. 다만 진단 파일을 만들 수 없어 작동 문제 피드백(문의)은 받을 수 없어요. 고급 설정에서 언제든 바꿀 수 있어요.'),
+]
 NOTICE = [
     ('p', '트래커가 잘 작동하지 않을 때(내 위치를 못 찾는 등) 원인을 찾기 위해, 작동 기록(로그)을 이 PC 에만 저장해요. 자동으로 어디에도 보내지 않아요.'),
     ('p', '문제가 생기면 고급 설정의 「진단 파일 만들기」로 만든 파일을 문의에 직접 첨부해 주세요.'),
@@ -25,8 +43,10 @@ NOTICE = [
     ('w', '거부해도 트래커는 그대로 쓸 수 있어요. 다만 진단 파일을 만들 수 없어 작동 문제 피드백(문의)은 받을 수 없어요. 고급 설정에서 언제든 바꿀 수 있어요.'),
 ]
 
+NOTICE_OCR = NOTICE
+
 _lock = threading.Lock()
-S = {'on': False, 'path': '', 'ver': '', 'here': '', 'crops': collections.deque(maxlen=3), 'last': {}, 'stat': None, 'stat_t': 0.0}
+S = {'on': False, 'path': '', 'ver': '', 'here': '', 'kind': 'ocr', 'crops': collections.deque(maxlen=3), 'last': {}, 'stat': None, 'stat_t': 0.0}
 
 
 def _mask(s):
@@ -43,9 +63,12 @@ def consent(cfg):
     return cfg.get('diag') if cfg.get('diag_ver') == CONSENT_VER and cfg.get('diag') in ('yes', 'no') else None
 
 
-def init(cfg, here, ver):
-    S['here'], S['ver'] = here, ver
-    S['path'] = os.path.join(here, 'promilia-tracker2-diag.log')
+def init(cfg, here, ver, kind='ocr'):
+    """kind: 'ocr'(화면 인식 트래커) · 'mem'(메모리 트래커) — 로그 파일 이름 · 동의 안내 문구가 달라짐"""
+    global NOTICE
+    S['here'], S['ver'], S['kind'] = here, ver, kind
+    S['path'] = os.path.join(here, LOG_NAME.get(kind, LOG_NAME['ocr']))
+    NOTICE = NOTICE_MEM if kind == 'mem' else NOTICE_OCR
     set_on(consent(cfg) == 'yes')
 
 
@@ -167,10 +190,10 @@ def make_zip(St=None, extra=None):
     desk = os.path.join(os.path.expanduser('~'), 'Desktop')
     out_dir = desk if os.path.isdir(desk) else S['here']
     path = os.path.join(out_dir, time.strftime('PromiliaTracker-진단-%y%m%d-%H%M%S.zip'))
-    summary = {'tracker': S['ver'], 'made': time.strftime('%Y-%m-%d %H:%M:%S'), **env()}
+    summary = {'tracker': S['ver'], 'kind': S['kind'], 'made': time.strftime('%Y-%m-%d %H:%M:%S'), **env()}
     if St is not None:
         summary.update(state=St.state, msg=St.msg, game=St.game, server=St.server, clients=St.clients, error=St.error, debug=St.debug,
-                       city=St.city, score=round(float(St.score or 0), 3))
+                       city=St.city, score=round(float(getattr(St, 'score', 0) or 0), 3), method=getattr(St, 'method', ''))
     if extra:
         summary.update(extra)
     with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
