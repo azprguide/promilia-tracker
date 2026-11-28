@@ -12,9 +12,10 @@
 import asyncio, base64, hashlib, json, os, struct, sys, time, threading
 import ctypes, ctypes.wintypes as W
 import diag
+import atexit, urllib.request
 
 APP = '프로밀리아 가이드 트래커'
-VER = '2.1.2'   # 11-28: 덜 뚜렷한 후보도 두 번 연속 같은 자리면 붙음 (3440×1440 진단) · 2.1.1: 미니맵 테두리 오인식 거르기 · 기본 자리 번갈아 시험
+VER = '2.2.0'   # 11-28: 원본 해상도 조각 그림으로 정밀 비교 · 후보 여러 곳 비교 · 익명 인식 통계 · 2.1.2: 덜 뚜렷한 후보도 두 번 연속 같은 자리면 붙음 (3440×1440 진단) · 2.1.1: 미니맵 테두리 오인식 거르기 · 기본 자리 번갈아 시험
 PORT = 46822
 MAP_URL = 'https://azprguide.xyz/map'   # 11-27: 사이트 새 주소 (지도 자료는 locator.py 가 받음)
 # 새 버전 안내 (updater.py · 11-27): 이 저장소 Releases 에서 앞말 없는 태그(2.1.0 · v2.1.0)만 이 트래커의 새 버전으로 봄 — 메모리 트래커는 'mem-' 태그
@@ -63,6 +64,37 @@ def save_cfg():
         pass
 
 
+# ---------- 인식 통계 (11-28 · 2.2.0): 성공 · 실패 이유 · 지도별 횟수만 익명으로 사이트에 보냄 (화면 · 위치 · 기기 정보 없음 · 설정에서 끌 수 있음) ----------
+STATS_URL = 'https://azprguide.xyz/api/tracker/stats'
+class Stats:
+    lock = threading.Lock(); ok = 0; fail = {}; maps = {}; hi = {}; res = ''; last = time.time()
+
+    @classmethod
+    def add(cls, d, k, n=1):
+        with cls.lock:
+            d[k] = d.get(k, 0) + n
+
+    @classmethod
+    def send(cls, force=False):
+        if not St.cfg.get('stats', True):
+            return
+        with cls.lock:
+            if not cls.res or (cls.ok == 0 and not cls.fail):
+                return
+            if not force and time.time() - cls.last < 900:
+                return
+            body = {'ver': VER, 'res': cls.res, 'ok': cls.ok, 'fail': cls.fail, 'maps': cls.maps, 'hi': cls.hi}
+            cls.ok = 0; cls.fail = {}; cls.maps = {}; cls.hi = {}; cls.last = time.time()
+        try:
+            req = urllib.request.Request(STATS_URL, data=json.dumps(body, ensure_ascii=False).encode(), headers={'content-type': 'application/json', 'User-Agent': 'PromiliaTracker2/' + VER}, method='POST')
+            urllib.request.urlopen(req, timeout=8).read()
+        except Exception:
+            pass
+
+
+atexit.register(lambda: Stats.send(True))
+
+
 def setstate(s, msg=''):
     St.state, St.msg = s, msg
 
@@ -98,11 +130,15 @@ def worker():
         if not r:
             St.game = 'off'; St.pos = None; loc.cur = None; setstate('nogame', '게임 창을 찾는 중…'); time.sleep(1); continue
         St.game = 'on'; x, y, w, h = r
+        Stats.res = f'{w}x{h}'
+        threading.Thread(target=Stats.send, daemon=True).start() if time.time() - Stats.last > 900 else None
         if (w, h) != wsize or miss % 40 == 12:                         # 창 크기가 바뀌었거나 오래 못 찾으면 미니맵 테두리를 다시 찾음 (21:9 등)
             wsize = (w, h)
             try:
                 g, sc = loc.detect(lambda b: capture.grab((x + b[0], y + b[1], x + b[2], y + b[3])), w, h)
                 St.debug = f'미니맵 자리 {g} (테두리 {sc:.2f})' if g else f'미니맵 테두리를 못 찾아 기본 자리를 씀 ({sc:.2f})'
+                if not g:
+                    Stats.add(Stats.fail, '테두리 못 찾음')
                 diag.log('ring', w=w, h=h, ratio=diag.ratio(w, h), found=bool(g), geom=[int(v) for v in g] if g else None, score=round(sc, 3), crop=list(loc.crop_box(w, h)),
                          cand=loc.cand, expect=[[round(v) for v in e] for e in loc.expected(w, h)], win=[x, y, w, h])   # 11-28: 후보 · 버린 이유 · 예상 자리 · 게임 창
             except Exception as e:
@@ -115,6 +151,10 @@ def worker():
             if res and alt:
                 diag.log('ring', drop=[int(v) for v in loc.geom], why='기본 자리에서 찾음'); loc.geom = None
             diag.frame(res, img, loc.info)
+            if res:
+                Stats.ok += 1; Stats.add(Stats.maps, res[1].name); Stats.add(Stats.hi, getattr(loc, 'via', '') or 'base')
+            else:
+                Stats.add(Stats.fail, (loc.info or {}).get('why') or '알 수 없음')
         except Exception as e:
             res = None; St.debug = f'화면을 읽지 못했어요: {type(e).__name__}'; diag.once('caperr', 'error', where='capture', err=f'{type(e).__name__}: {e}')
         if res:
@@ -244,8 +284,8 @@ def main():
         upd.start_auto()                                             # 켤 때 + 켜 둔 동안 6시간마다 조용히 확인 (설정에서 끌 수 있음)
         ico = os.path.join(getattr(sys, '_MEIPASS', HERE), 'assets', 'tracker.ico')
         gui.App(St, save_cfg, {'app': APP, 'ver': VER, 'port': PORT, 'map': MAP_URL, 'ico': ico, 'admin': lambda: True, 'diag': diag,
-                               'upd': upd, 'repo_url': upd.repo_page(), 'toggles': [('auto', '게임 창 자동 찾기')],
-                               'info': f'웹소켓 ws://127.0.0.1:{PORT} · 연결 허용: azprguide.xyz · azur-promilia.pages.dev\n게임 화면의 미니맵만 캡처해요 (메모리 읽기 없음 · 화면은 PC 밖으로 보내지 않음)'}).run()
+                               'upd': upd, 'repo_url': upd.repo_page(), 'toggles': [('auto', '게임 창 자동 찾기'), ('stats', '인식 통계 익명으로 보내기')],
+                               'info': f'웹소켓 ws://127.0.0.1:{PORT} · 연결 허용: azprguide.xyz · azur-promilia.pages.dev\n게임 화면의 미니맵만 캡처해요 (메모리 읽기 없음 · 화면은 PC 밖으로 보내지 않음)\n인식 통계: 성공 · 실패 횟수와 이유 · 지도 이름 · 화면 해상도만 15분마다 익명으로 보내요 (위치 · 화면 없음 · 위 스위치로 끌 수 있음)'}).run()
 
 
 if __name__ == '__main__':

@@ -7,7 +7,8 @@
 - 좌표: 지도 그림 위치(u, v) → 월드 좌표 = 사이트 map.html toUV 의 역변환 (data.json maps[].xf = [ox, oz, 가로, 세로, 회전])
 - 높이(y): 3D 보기용 지형 높이 그림(h.webp · 16비트)에서 읽음 (없으면 0)
 """
-import io, json, math, os, time, urllib.request
+import io, json, math, os, time, threading, urllib.request
+from collections import OrderedDict
 import numpy as np
 from PIL import Image, ImageFilter
 
@@ -21,6 +22,10 @@ MM_CX, MM_CY, MM_R = 285, 245, 150
 MM_PX_PER_M = 3.45                       # 예전 값(tex 가 없는 지도 자료일 때만 씀)
 MM_TEX_K = 3.45 * 2100 / 8192
 COARSE, FINE = 1024, 2048
+# 11-28 (2.2.0): 원본 해상도 조각 그림(사이트 <지도>/t_<행>_<열>.webp · 1024px · 큰 지도는 8×8 = 8192px)으로 마지막 정밀 비교 —
+#   base.webp(2048px)는 8192px 지도에서 게임 미니맵보다 4배 흐려 비슷한 곳(풀숲 · 길)이 여러 군데로 잡히던 것. 조각은 필요한 것만 받아 maps/<지도>/ 에 보관
+HI_PATCH = 220          # 조각 비교 때 미니맵 조각을 이 크기(px) 근처로 맞춤 (게임 미니맵 화소 수와 비슷 · 너무 크면 느림)
+HI_LRU = 24             # 메모리에 둘 조각 수
 # 미니맵 둥근 테두리 (세로 2160 · 16:9 화면에서 잰 값): 가운데 (290, 246) · 반지름 184 — 화면 비율(21:9 · 32:9 · 16:10)이나 UI 배치가 달라도
 # 이 테두리를 화면에서 직접 찾아 미니맵 자리를 잡음(find_ring). 못 찾으면 예전처럼 '세로 비례 + 왼쪽 위' 자리
 RING_CX, RING_CY, RING_R = 290, 246, 184
@@ -120,7 +125,10 @@ class MapData:
         self.id, self.name = str(m['id']), m['name']
         self.size, self.xf, self.h = m['size'], m.get('xf') or [0, 0, m['size'][0], m['size'][1], 0], m.get('h')
         self.tex = m.get('tex')            # 게임 지도 그림 가로 화소 (미니맵 축척 계산)
-        d = os.path.join(cache, self.id)
+        self.tiles = int(m.get('tiles') or 0)   # 원본 조각 그림 칸 수(가로 = 세로) · 0 이면 조각 없음(base 가 이미 원본 크기)
+        self.dir = os.path.join(cache, self.id)
+        self.tc = OrderedDict(); self.bad = set(); self.lock = threading.Lock()
+        d = self.dir
         base = Image.open(os.path.join(d, 'base.webp')).convert('RGB')
         self.fc = feat(base.resize((COARSE, COARSE), Image.BILINEAR))
         self.ff = feat(base.resize((FINE, FINE), Image.BILINEAR)) if base.width >= FINE else feat(base.resize((FINE, FINE), Image.BICUBIC))
@@ -129,6 +137,30 @@ class MapData:
         if self.h and os.path.exists(hp):
             a = np.asarray(Image.open(hp).convert('RGB'), np.float32)
             self.hm = (a[..., 0] * 256 + a[..., 1]) / 65535 * (self.h['max'] - self.h['min']) + self.h['min']
+
+    def tile(self, r, c, tpx):
+        """원본 조각 (r 행, c 열) → tpx×tpx 로 줄인 RGB 그림 (없으면 받아서 maps/<지도>/t_r_c.webp 로 보관) · 실패하면 None"""
+        key = (r, c, tpx)
+        with self.lock:
+            if key in self.tc:
+                self.tc.move_to_end(key); return self.tc[key]
+        if (r, c) in self.bad or not (0 <= r < self.tiles and 0 <= c < self.tiles):
+            return None
+        p = os.path.join(self.dir, f't_{r}_{c}.webp')
+        try:
+            if not os.path.exists(p) or os.path.getsize(p) == 0:
+                raw = urllib.request.urlopen(urllib.request.Request(BASE + f'{self.id}/t_{r}_{c}.webp', headers={'User-Agent': 'PromiliaTracker2'}), timeout=8).read()
+                open(p, 'wb').write(raw)
+            im = Image.open(p).convert('RGB')
+            if im.width != tpx:
+                im = im.resize((tpx, tpx), Image.BILINEAR)
+        except Exception:
+            self.bad.add((r, c)); return None
+        with self.lock:
+            self.tc[key] = im
+            while len(self.tc) > HI_LRU:
+                self.tc.popitem(last=False)
+        return im
 
     def world(self, u, v):
         """지도 그림 위치(0~1) → 월드 (x, y, z)"""
@@ -243,6 +275,57 @@ class Locator:
         t = feat(patch.resize((size, size), Image.BILINEAR)); s, x, y = peak(ncc(I, t, icon_mask(t, ring(size))))
         return s, (x0 + x + half) / FINE, (y0 + y + half) / FINE
 
+    def hi(self, patch, mp, u, v, win=0.004):
+        """원본 조각 그림으로 (u, v) 둘레 ±win 안에서 정밀 비교 → (점수, u, v) · 조각이 없는 지도 · 받기 실패면 None"""
+        if not mp.tiles:
+            return None
+        full = mp.tiles * 1024; ts = self.tsize(mp, full)            # 원본 해상도에서 미니맵 조각 크기
+        kf = min(1.0, HI_PATCH / max(ts, 1)); tpx = max(64, int(round(1024 * kf))); W = tpx * mp.tiles
+        size = max(24, int(round(ts * tpx / 1024))); half = size / 2; m = max(6, int(win * W)); n = size + 2 * m
+        x0, y0 = int(round(u * W - half - m)), int(round(v * W - half - m))
+        x0, y0 = max(0, min(W - n, x0)), max(0, min(W - n, y0))
+        canvas = Image.new('RGB', (n, n))
+        for r in range(y0 // tpx, (y0 + n - 1) // tpx + 1):
+            for c in range(x0 // tpx, (x0 + n - 1) // tpx + 1):
+                t = mp.tile(r, c, tpx)
+                if t is None:
+                    return None
+                canvas.paste(t, (c * tpx - x0, r * tpx - y0))
+        t = feat(patch.resize((size, size), Image.BILINEAR)); sc, x, y = peak(ncc(feat(canvas), t, icon_mask(t, ring(size))))
+        return sc, (x0 + x + half) / W, (y0 + y + half) / W
+
+    def cands(self, patch, k=3):
+        """지도 전체에서 찾은 후보들 [(점수, 지도, u, v)] — 지도마다 위에서 k 곳(서로 겹치지 않게) · 점수 높은 순"""
+        out = []
+        for mp in self.maps:
+            size = max(12, int(round(self.tsize(mp, COARSE))))
+            if size > COARSE // 2:
+                continue
+            t = feat(patch.resize((size, size), Image.BILINEAR)); sc = ncc(mp.fc, t, icon_mask(t, ring(size))); r = max(4, size // 2)
+            for _ in range(k):
+                v, x, y = peak(sc)
+                if v < 0.15:
+                    break
+                out.append((v, mp, (x + size / 2) / COARSE, (y + size / 2) / COARSE))
+                ix, iy = int(round(x)), int(round(y)); sc[max(0, iy - r):iy + r + 1, max(0, ix - r):ix + r + 1] = -1
+        return sorted(out, key=lambda c: -c[0])
+
+    def locate_hi(self, patch, cs=None):
+        """조각 그림이 있는 지도: 후보 몇 곳을 원본 해상도로 다시 비교해 가장 잘 맞는 곳을 고름 (2.2.0)
+        → (점수, 지도, u, v, 둘째와의 비율) 또는 None"""
+        cs = [c for c in (cs if cs is not None else self.cands(patch)) if c[1].tiles][:5]
+        res = []
+        for v0, mp, u, v in cs:
+            f = self.fine(patch, mp, u, v, win=0.02)
+            h = self.hi(patch, mp, f[1], f[2], win=0.004)
+            if h:
+                res.append((h[0], mp, h[1], h[2], v0, f[0]))
+        if not res:
+            return None
+        res.sort(key=lambda r: -r[0]); b = res[0]
+        sec = max([r[0] for r in res[1:] if r[1] is not b[1] or math.hypot(r[2] - b[2], r[3] - b[3]) > 0.01] or [0.0])
+        return b[0], b[1], b[2], b[3], b[0] / max(sec, 1e-6), b[4], b[5]
+
     def locate(self, patch):
         """미니맵 조각 → (점수, MapData, u, v) 또는 None. 붙어 있으면 둘레만, 아니면 전체에서"""
         tx = texture(patch)
@@ -252,14 +335,38 @@ class Locator:
             mp, u, v = self.cur
             s, u2, v2 = self.fine(patch, mp, u, v)
             if s >= 0.5:
-                self.cur = (mp, u2, v2); return s, mp, u2, v2
+                h = self.hi(patch, mp, u2, v2, win=0.003)          # 2.2.0: 원본 조각으로 다듬기 (약 4배 정밀)
+                if h and h[0] >= 0.45:
+                    u2, v2 = h[1], h[2]
+                self.via = '따라가기'; self.cur = (mp, u2, v2); return s, mp, u2, v2
+            h = self.hi(patch, mp, u, v, win=0.012)                # base 로 놓쳐도 원본 조각에서 맞으면 이어서
+            if h and h[0] >= 0.55:
+                self.via = '조각으로 이어감'; self.cur = (mp, h[1], h[2]); return h[0], mp, h[1], h[2]
             self.cur = None
-        c = self.coarse(patch)
+        # 2.2.0: 조각 그림이 있는 큰 지도는 후보 여러 곳을 원본 해상도로 비교해 고름 — 한 곳이 뚜렷하면(둘째의 1.12배↑) 바로 붙음
+        cs = self.cands(patch)                                    # 지도 전체 후보 (한 번만 계산 · 아래 예전 방식도 같이 씀)
+        try:
+            hb = self.locate_hi(patch, cs)
+        except Exception:
+            hb = None
+        if hb and hb[0] >= 0.5 and hb[4] >= 1.12:
+            s, mp, u, v = hb[:4]
+            self.pend = None; self.cur = (mp, u, v); self.info = {}; self.via = '조각 비교로 찾음'
+            return s, mp, u, v
+        if hb:
+            self.info_hi = {'hi': round(hb[0], 3), 'hi_uniq': round(hb[4], 2), 'hi_map': hb[1].name}
+        else:
+            self.info_hi = {}
+        # 예전 방식(base 그림만): 가장 높은 후보 + 같은 지도 둘째 후보와의 비율
+        c = None
+        if cs:
+            b = cs[0]; sec = next((x[0] for x in cs[1:] if x[1] is b[1]), 0.0)
+            c = (b[0], b[1], b[2], b[3], b[0] / max(sec, 1e-6))
         # 전체에서 찾을 때는 점수가 높고(0.6↑) 한 곳만 뚜렷해야(둘째의 1.25배↑) 바로 붙음
         # 11-28: 덜 뚜렷한 경우(1.1 ~ 1.25배)는 정밀 점수가 0.62↑ 이고 연속 두 번 같은 자리(지도 그림 1% 안)일 때 붙음
         #   — 3440×1440 진단: 맞는 자리(새싹 골짜기)를 찾았는데 둘째의 1.20배라 계속 버려지던 것 (사이트 지도 그림이 2048px 라 미니맵보다 흐림)
         if not c or c[0] < 0.6 or c[4] < 1.1:
-            self.info = {'why': '지도와 맞는 곳 없음', 'tex': round(tx, 3), 'best_map': c[1].name if c else None, 'score': round(c[0], 3) if c else None, 'uniq': round(c[4], 2) if c else None}
+            self.info = {'why': '지도와 맞는 곳 없음', 'tex': round(tx, 3), 'best_map': c[1].name if c else None, 'score': round(c[0], 3) if c else None, 'uniq': round(c[4], 2) if c else None, **self.info_hi}
             return None
         s0, mp, u, v, uq = c
         s, u2, v2 = self.fine(patch, mp, u, v, win=0.02)
@@ -274,5 +381,5 @@ class Locator:
                 self.info = {'why': '후보 확인 중(한 번 더 같은 자리면 붙음)', 'map': mp.name, 'coarse': round(s0, 3), 'fine': round(s, 3), 'uniq': round(uq, 2)}
                 return None
         self.pend = None
-        self.cur = (mp, u2, v2); self.info = {}
+        self.cur = (mp, u2, v2); self.info = {}; self.via = '예전 방식으로 찾음'
         return s, mp, u2, v2
